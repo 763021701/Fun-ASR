@@ -55,18 +55,23 @@ class PhonemeCorrector:
     """
 
     def __init__(self, threshold: float = 0.7, similar_threshold: float = None,
-                 min_hotword_chars: int = 2, min_hotword_phonemes: int = 3):
+                 min_hotword_chars: int = 2, min_hotword_phonemes: int = 3,
+                 min_char_coverage: float = 0.6):
         """
         初始化拼音纠错器
 
         Args:
             min_hotword_chars: 热词最小字符数，低于此值的热词将被跳过
             min_hotword_phonemes: 热词最小音素数，音素数低于此值的热词需要更高阈值
+            min_char_coverage: 匹配文本字符数与热词字符数的最小比值 (0-1)
+                               例如 0.6 表示匹配到的字符跨度至少要是热词长度的 60%
+                               可防止 "Ⅱ式"(2字) 匹配到 "式"(1字, 50%) 这类误匹配
         """
         self.threshold = threshold
         self.similar_threshold = similar_threshold if similar_threshold is not None else threshold - 0.2
         self.min_hotword_chars = min_hotword_chars
         self.min_hotword_phonemes = min_hotword_phonemes
+        self.min_char_coverage = min_char_coverage
         
         self.max_diff = 2             # 滑窗匹配中允许的最大音素差异数
         self.top_k_candidates = 100   # 粗筛保留的候选词数
@@ -127,17 +132,24 @@ class PhonemeCorrector:
             search_threshold = min(eff_threshold, eff_similar_threshold) - 0.1
             
             found_segments = fuzzy_substring_search_constrained(hw_compare, input_processed, threshold=search_threshold)
-            
+
+            hw_chars = len(hw)
             for score, start_phon_idx, end_phon_idx in found_segments:
                 char_start = input_processed[start_phon_idx][5]
                 char_end = input_processed[end_phon_idx-1][6]
-                
+
+                # Reject matches where the matched text span is much shorter than the
+                # hotword itself (e.g. "Ⅱ式" 2 chars matching "式" 1 char = 0.5 coverage)
+                matched_chars = char_end - char_start
+                if matched_chars / hw_chars < self.min_char_coverage:
+                    continue
+
                 res = MatchResult(char_start, char_end, score, hw)
                 origin_val = text[char_start:char_end]
-                
+
                 if score >= eff_threshold:
                     matches.append(res)
-                
+
                 if score >= eff_similar_threshold:
                     similars.append((origin_val, hw, score))
 
