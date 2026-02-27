@@ -34,6 +34,7 @@ class CorrectionResult(NamedTuple):
     text: str                           # 纠错后的文本
     matchs: List[Tuple[str, str, float]]  # [(原词, 热词, 分数), ...]
     similars: List[Tuple[str, str, float]]  # [(原词, 热词, 分数), ...]
+    details: dict = None                # 各阶段中间结果 (FastRAG, AccuRAG, merged)
     
 
 
@@ -199,18 +200,27 @@ class PhonemeCorrector:
             logger.debug(f"[DEBUG] input_phonemes[0].info type: {type(input_phonemes[0].info)}, value: {input_phonemes[0].info}")
 
         # 2. 检索与匹配
+        stage_details = {
+            "fast_raw": [],
+            "accu_raw": [],
+            "merged": [],
+        }
+
         with self._lock:
             # Stage 1: FastRAG coarse screening (inverted index + Numba JIT)
             fast_results = self.fast_rag.search(input_phonemes, top_k=100)
+            stage_details["fast_raw"] = list(fast_results)
             logger.debug(f"[DEBUG] FastRAG coarse results: {len(fast_results)} candidates")
 
             # Stage 2: AccuRAG precise re-ranking (fuzzy phoneme weights)
+            accu_results = []
             if fast_results:
                 fast_candidate_hws = [hw for hw, _ in fast_results]
                 accu_results = self.accu_rag.search(
                     input_phonemes, candidate_hws=fast_candidate_hws,
                     top_k=self.top_k_candidates, apply_threshold=False,
                 )
+                stage_details["accu_raw"] = list(accu_results)
                 # Merge: use AccuRAG's precise score, keep candidates that pass either stage
                 accu_scores = {hw: score for hw, score, _, _ in accu_results}
                 merged_results = []
@@ -220,6 +230,7 @@ class PhonemeCorrector:
                     merged_results.append((hw, best_score))
                 merged_results.sort(key=lambda x: x[1], reverse=True)
                 fast_results = merged_results
+                stage_details["merged"] = list(fast_results)
                 logger.debug(f"[DEBUG] AccuRAG re-ranked: {len(fast_results)} candidates")
 
             # 预处理输入 (转换为全能七元组：值, 语言, 字始, 字终, 是调, 始位, 终位)
@@ -240,7 +251,10 @@ class PhonemeCorrector:
         new_text, final_hw_info, all_hw_info = self._resolve_and_replace(text, matches)
         
         # similars 已经是 [(origin, hw, score), ...] 的元组列表
-        return CorrectionResult(text=new_text, matchs=final_hw_info, similars=similars[:k])
+        return CorrectionResult(
+            text=new_text, matchs=final_hw_info,
+            similars=similars[:k], details=stage_details,
+        )
 
 
 if __name__ == "__main__":

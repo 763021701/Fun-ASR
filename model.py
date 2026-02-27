@@ -644,6 +644,7 @@ class FunASRNano(nn.Module):
             ctc_text = self.ctc_tokenizer.decode(yseq[yseq != self.blank_id].tolist())
 
             # Retrieve matching hotwords from CTC text
+            rag_retrieved = []
             if ctc_text:
                 res = corrector.correct(ctc_text, k=max_hotwords)
                 retrieved = set()
@@ -652,12 +653,22 @@ class FunASRNano(nn.Module):
                 for _, hw, _ in res.similars:
                     retrieved.add(hw)
                 if retrieved:
-                    hotwords = list(retrieved) + hotwords
-                    logging.info(f"RAG retrieved hotwords: {list(retrieved)}")
+                    rag_retrieved = list(retrieved)
+                    hotwords = rag_retrieved + hotwords
+                    logging.info(f"RAG retrieved hotwords: {rag_retrieved}")
+                kwargs["_rag_meta"] = {
+                    "rag_ctc_text": ctc_text,
+                    "rag_correction": res,
+                    "rag_retrieved_hotwords": rag_retrieved,
+                    "rag_details": getattr(res, 'details', None),
+                }
 
             # Cache encoder output to skip re-encoding in Phase 2
             kwargs["audio_embedding"] = encoder_out
             kwargs["audio_embedding_lens"] = encoder_out_lens
+
+        # Record final hotwords list for traceability
+        kwargs["_rag_final_hotwords"] = hotwords
 
         # Phase 2 (or normal flow): build prompt with all hotwords and run LLM
         prompt = self.get_prompt(
@@ -783,6 +794,14 @@ class FunASRNano(nn.Module):
         }
         if loss is not None:
             result_i["loss"] = loss
+
+        rag_meta = kwargs.get("_rag_meta")
+        if rag_meta:
+            result_i["rag_meta"] = rag_meta
+        final_hws = kwargs.get("_rag_final_hotwords")
+        if final_hws is not None:
+            result_i["rag_final_hotwords"] = final_hws
+
         results.append(result_i)
 
         for ctc_result, result in zip(ctc_results, results):
