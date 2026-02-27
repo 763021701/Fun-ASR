@@ -790,12 +790,12 @@ class FunASRNano(nn.Module):
             target_ids = torch.tensor(
                 self.ctc_tokenizer.encode(result["ctc_text"]), dtype=torch.int64
             )
-            result["ctc_timestamps"] = forced_align(
+            result["ctc_token_align"] = forced_align(
                 ctc_result["ctc_logits"], target_ids, self.blank_id
             )
             target_ids = torch.tensor(self.ctc_tokenizer.encode(result["text"]), dtype=torch.int64)
-            result["timestamps"] = forced_align(ctc_result["ctc_logits"], target_ids, self.blank_id)
-            for timestamps in [result["timestamps"], result["ctc_timestamps"]]:
+            result["token_align"] = forced_align(ctc_result["ctc_logits"], target_ids, self.blank_id)
+            for timestamps in [result["token_align"], result["ctc_token_align"]]:
                 for timestamp in timestamps:
                     timestamp["token"] = self.ctc_tokenizer.decode([timestamp["token"]])
                     timestamp["start_time"] = timestamp["start_time"] * 6 * 10 / 1000
