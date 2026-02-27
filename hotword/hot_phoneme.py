@@ -54,12 +54,19 @@ class PhonemeCorrector:
     并将相似度超过阈值的片段替换为热词。
     """
 
-    def __init__(self, threshold: float = 0.7, similar_threshold: float = None):
+    def __init__(self, threshold: float = 0.7, similar_threshold: float = None,
+                 min_hotword_chars: int = 2, min_hotword_phonemes: int = 3):
         """
         初始化拼音纠错器
+
+        Args:
+            min_hotword_chars: 热词最小字符数，低于此值的热词将被跳过
+            min_hotword_phonemes: 热词最小音素数，音素数低于此值的热词需要更高阈值
         """
         self.threshold = threshold
         self.similar_threshold = similar_threshold if similar_threshold is not None else threshold - 0.2
+        self.min_hotword_chars = min_hotword_chars
+        self.min_hotword_phonemes = min_hotword_phonemes
         
         self.max_diff = 2             # 滑窗匹配中允许的最大音素差异数
         self.top_k_candidates = 100   # 粗筛保留的候选词数
@@ -77,10 +84,16 @@ class PhonemeCorrector:
         lines = [line.strip() for line in hotword_text.splitlines() if line.strip() and not line.strip().startswith('#')]
         
         new_hotwords = {}
+        skipped = 0
         for hw in lines:
+            if len(hw) < self.min_hotword_chars:
+                skipped += 1
+                continue
             phons = get_phoneme_info(hw)
             if phons:
                 new_hotwords[hw] = phons
+        if skipped:
+            logger.info(f"Skipped {skipped} hotwords shorter than {self.min_hotword_chars} chars")
         
         with self._lock:
             self.hotwords = new_hotwords
@@ -102,27 +115,30 @@ class PhonemeCorrector:
             hw_phonemes = self.hotwords[hw]
             hw_compare = [p.info[:5] for p in hw_phonemes]
             
-            # 使用新算法：在输入序列中一站式搜索所有符合边界的最优区域
-            # 为 Similar 列表使用更宽松的 initial 阈值，确保能抓到压线匹配
-            search_threshold = min(self.threshold, self.similar_threshold) - 0.1
+            # Short hotwords (few phonemes) require stricter thresholds
+            n_phonemes = len(hw_phonemes)
+            if n_phonemes < self.min_hotword_phonemes:
+                eff_threshold = min(self.threshold + 0.15, 1.0)
+                eff_similar_threshold = min(self.similar_threshold + 0.15, 1.0)
+            else:
+                eff_threshold = self.threshold
+                eff_similar_threshold = self.similar_threshold
             
-            # 搜索匹配
+            search_threshold = min(eff_threshold, eff_similar_threshold) - 0.1
+            
             found_segments = fuzzy_substring_search_constrained(hw_compare, input_processed, threshold=search_threshold)
             
             for score, start_phon_idx, end_phon_idx in found_segments:
-                # 从 input_processed 直接拿 char 索引
                 char_start = input_processed[start_phon_idx][5]
                 char_end = input_processed[end_phon_idx-1][6]
                 
                 res = MatchResult(char_start, char_end, score, hw)
                 origin_val = text[char_start:char_end]
                 
-                # 分类到 matches 和 similars
-                if score >= self.threshold:
+                if score >= eff_threshold:
                     matches.append(res)
                 
-                # 所有超过相似度阈值的都记入 similars（用于提示）
-                if score >= self.similar_threshold:
+                if score >= eff_similar_threshold:
                     similars.append((origin_val, hw, score))
 
         # 潜在热词去重与排序 (不再简单按 seen_hw 排重，而是按分数和覆盖范围排序)

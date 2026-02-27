@@ -647,15 +647,18 @@ class FunASRNano(nn.Module):
             rag_retrieved = []
             if ctc_text:
                 res = corrector.correct(ctc_text, k=max_hotwords)
-                retrieved = set()
-                for _, hw, _ in res.matchs:
-                    retrieved.add(hw)
-                for _, hw, _ in res.similars:
-                    retrieved.add(hw)
-                if retrieved:
-                    rag_retrieved = list(retrieved)
+                # Collect unique hotwords scored by best match, prioritize by score
+                hw_best_score = {}
+                for _, hw, score in res.matchs:
+                    hw_best_score[hw] = max(hw_best_score.get(hw, 0.0), score)
+                for _, hw, score in res.similars:
+                    hw_best_score[hw] = max(hw_best_score.get(hw, 0.0), score)
+                # Sort by score descending, limit to max_hotwords
+                ranked = sorted(hw_best_score.items(), key=lambda x: x[1], reverse=True)
+                rag_retrieved = [hw for hw, _ in ranked[:max_hotwords]]
+                if rag_retrieved:
                     hotwords = rag_retrieved + hotwords
-                    logging.info(f"RAG retrieved hotwords: {rag_retrieved}")
+                    logging.info(f"RAG retrieved hotwords ({len(rag_retrieved)}): {rag_retrieved}")
                 kwargs["_rag_meta"] = {
                     "rag_ctc_text": ctc_text,
                     "rag_correction": res,
