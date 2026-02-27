@@ -547,6 +547,23 @@ class FunASRNano(nn.Module):
                     speech_idx += 1
         return inputs_embeds, contents, batch, source_ids, meta_data
 
+    def _get_hotword_corrector(self, hotword_file):
+        """Lazy-initialize hotword corrector for RAG-based retrieval."""
+        if not hasattr(self, '_hotword_corrector_cache'):
+            self._hotword_corrector_cache = {}
+        if hotword_file not in self._hotword_corrector_cache:
+            try:
+                from hotword import PhonemeCorrector
+                corrector = PhonemeCorrector(threshold=0.7, similar_threshold=0.6)
+                with open(hotword_file, 'r', encoding='utf-8') as f:
+                    n = corrector.update_hotwords(f.read())
+                self._hotword_corrector_cache[hotword_file] = corrector
+                logging.info(f"Loaded {n} hotwords from {hotword_file}")
+            except Exception as e:
+                logging.warning(f"Failed to load hotwords: {e}")
+                self._hotword_corrector_cache[hotword_file] = None
+        return self._hotword_corrector_cache[hotword_file]
+
     def get_prompt(self, hotwords: list[str], language: str = None, itn: bool = True):
         if len(hotwords) > 0:
             hotwords = ", ".join(hotwords)
@@ -589,8 +606,57 @@ class FunASRNano(nn.Module):
         frontend=None,
         **kwargs,
     ):
+        hotwords = list(kwargs.get("hotwords", []))
+        hotword_file = kwargs.pop("hotword_file", None)
+        max_hotwords = kwargs.pop("max_hotwords", 10)
+
+        # RAG-based hotword retrieval: CTC pre-recognition → phoneme edit distance → retrieve
+        corrector = self._get_hotword_corrector(hotword_file) if hotword_file else None
+
+        if self.ctc_decoder is not None and corrector is not None and corrector.hotwords:
+            # Phase 1: run encoder + CTC with a minimal prompt (no hotwords)
+            prompt_p1 = self.get_prompt([], kwargs.get("language", None), kwargs.get("itn", True))
+            data_in_p1 = [self.generate_chatml(prompt_p1, d) for d in data_in]
+
+            if key is None:
+                key = []
+                for _ in data_in:
+                    chars = string.ascii_letters + string.digits
+                    key.append("rand_key_" + "".join(random.choice(chars) for _ in range(13)))
+
+            _, _, _, _, meta_data = self.inference_prepare(
+                data_in_p1, data_lengths, key, tokenizer, frontend, **kwargs
+            )
+
+            # CTC greedy decode
+            encoder_out = meta_data["encoder_out"]
+            encoder_out_lens = meta_data["encoder_out_lens"]
+            decoder_out, _ = self.ctc_decoder(encoder_out, encoder_out_lens)
+            ctc_logits = self.ctc.log_softmax(decoder_out)
+            x = ctc_logits[0, : encoder_out_lens[0].item(), :]
+            yseq = x.argmax(dim=-1)
+            yseq = torch.unique_consecutive(yseq, dim=-1)
+            ctc_text = self.ctc_tokenizer.decode(yseq[yseq != self.blank_id].tolist())
+
+            # Retrieve matching hotwords from CTC text
+            if ctc_text:
+                res = corrector.correct(ctc_text, k=max_hotwords)
+                retrieved = set()
+                for _, hw, _ in res.matchs:
+                    retrieved.add(hw)
+                for _, hw, _ in res.similars:
+                    retrieved.add(hw)
+                if retrieved:
+                    hotwords = list(retrieved) + hotwords
+                    logging.info(f"RAG retrieved hotwords: {list(retrieved)}")
+
+            # Cache encoder output to skip re-encoding in Phase 2
+            kwargs["audio_embedding"] = encoder_out
+            kwargs["audio_embedding_lens"] = encoder_out_lens
+
+        # Phase 2 (or normal flow): build prompt with all hotwords and run LLM
         prompt = self.get_prompt(
-            kwargs.get("hotwords", []), kwargs.get("language", None), kwargs.get("itn", True)
+            hotwords, kwargs.get("language", None), kwargs.get("itn", True)
         )
         data_in = [self.generate_chatml(prompt, data) for data in data_in]
 
