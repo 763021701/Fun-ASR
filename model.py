@@ -483,6 +483,11 @@ class FunASRNano(nn.Module):
             if "audio_embedding" in kwargs and "audio_embedding_lens" in kwargs:
                 encoder_out = kwargs["audio_embedding"]
                 encoder_out_lens = kwargs["audio_embedding_lens"]
+                adaptor_out, adaptor_out_lens = self.audio_adaptor(encoder_out, encoder_out_lens)
+                meta_data["encoder_out"] = encoder_out
+                meta_data["encoder_out_lens"] = encoder_out_lens
+                meta_data["audio_adaptor_out"] = adaptor_out
+                meta_data["audio_adaptor_out_lens"] = adaptor_out_lens
             else:
                 speech_lengths = batch["speech_lengths"][:, 0]
                 # fp16
