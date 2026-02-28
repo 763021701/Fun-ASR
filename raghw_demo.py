@@ -113,8 +113,10 @@ def main():
         seg_label = f"Segment {seg_idx + 1}/{n_segments}" if n_segments > 1 else "Result"
         ctc_text = result.get("ctc_text", "")
         final_text = result.get("text", "")
-        rag_meta = result.get("rag_meta")
-        final_hotwords = result.get("rag_final_hotwords", [])
+        rag_meta_list = result.get("rag_meta")
+        rag_meta = rag_meta_list[0] if rag_meta_list else None
+        final_hws_list = result.get("rag_final_hotwords")
+        final_hotwords = final_hws_list[0] if final_hws_list else []
         all_final_texts.append(final_text)
 
         print(f"\n{'─' * 70}")

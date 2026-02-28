@@ -798,12 +798,14 @@ class FunASRNano(nn.Module):
         if loss is not None:
             result_i["loss"] = loss
 
+        # Wrap in list so funasr's VAD result-merging (which uses +=) works correctly.
+        # The demo reads these as result["rag_meta"][0] and result["rag_final_hotwords"][0].
         rag_meta = kwargs.get("_rag_meta")
         if rag_meta:
-            result_i["rag_meta"] = rag_meta
+            result_i["rag_meta"] = [rag_meta]
         final_hws = kwargs.get("_rag_final_hotwords")
         if final_hws is not None:
-            result_i["rag_final_hotwords"] = final_hws
+            result_i["rag_final_hotwords"] = [final_hws]
 
         results.append(result_i)
 
