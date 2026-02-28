@@ -24,15 +24,15 @@ def main():
 
     wav_path = f"{model.model_path}/example/zh.mp3"
 
-    # RAG-based hotword retrieval: CTC pre-recognition → phoneme matching → inject prompt
-    # hotword_file points to a text file with one hotword per line.
-    # The system uses CTC to get a rough transcription, then retrieves
-    # phonetically similar hotwords via edit distance, and injects them into the LLM prompt.
+    # hotwords accepts file path or list; hotword_mode controls strategy:
+    #   "rag"    (default) — CTC pre-recognition → phoneme retrieval → selective injection
+    #   "prompt"           — inject all hotwords directly into prompt
     res = model.generate(
         input=[wav_path],
         cache={},
         batch_size=1,
-        hotword_file="hot.txt",
+        hotwords="hot.txt",        # or hotwords=["丙泊酚", "结肠镜", "圈套器"]
+        hotword_mode="rag",         # or "prompt"
         # 中文、英文、日文 for Fun-ASR-Nano-2512
         # 中文、英文、粤语、日文、韩文、越南语、印尼语、泰语、马来语、菲律宾语、阿拉伯语、
         # 印地语、保加利亚语、克罗地亚语、捷克语、丹麦语、荷兰语、爱沙尼亚语、芬兰语、希腊语、

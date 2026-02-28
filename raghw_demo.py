@@ -11,10 +11,11 @@ model's return value — guaranteed to match what was injected into the LLM.
 
 Usage:
     python raghw_demo.py audio.wav
-    python raghw_demo.py audio.wav --hotword_file hot.txt
-    python raghw_demo.py audio.wav --hotword_file hot.txt --top_k 30
-    python raghw_demo.py audio.wav --vad                          # enable VAD for long audio
-    python raghw_demo.py audio.wav --vad --vad_max_segment 30000  # custom VAD segment length (ms)
+    python raghw_demo.py audio.wav --hotwords hot.txt
+    python raghw_demo.py audio.wav --hotwords hot.txt --top_k 30
+    python raghw_demo.py audio.wav --hotwords hot.txt --mode prompt  # prompt mode
+    python raghw_demo.py audio.wav --vad                             # enable VAD
+    python raghw_demo.py audio.wav --vad --vad_max_segment 30000
 """
 
 import sys
@@ -32,8 +33,10 @@ def count_hotwords(path):
 def main():
     parser = argparse.ArgumentParser(description="RAG Hotword Retrieval Demo")
     parser.add_argument("audio", help="Path to audio file")
-    parser.add_argument("--hotword_file", default="hot.txt",
-                        help="Hotword file path (default: hot.txt)")
+    parser.add_argument("--hotwords", default="hot.txt",
+                        help="Hotword file path or comma-separated list (default: hot.txt)")
+    parser.add_argument("--mode", default="rag", choices=["rag", "prompt"],
+                        help="Hotword mode: 'rag' (default) or 'prompt'")
     parser.add_argument("--language", default="中文", help="Language (default: 中文)")
     parser.add_argument("--model_dir", default="FunAudioLLM/Fun-ASR-Nano-2512")
     parser.add_argument("--max_hotwords", type=int, default=10,
@@ -61,9 +64,12 @@ def main():
     print("RAG Hotword Retrieval Demo")
     print(DIV)
 
-    hw_count = count_hotwords(args.hotword_file)
+    import os
+    is_file = os.path.isfile(args.hotwords)
+    hw_count = count_hotwords(args.hotwords) if is_file else len(args.hotwords.split(","))
     print(f"  Audio:        {args.audio}")
-    print(f"  Hotword file: {args.hotword_file} ({hw_count} hotwords)")
+    print(f"  Hotwords:     {args.hotwords} ({hw_count} hotwords)")
+    print(f"  Mode:         {args.mode}")
     print(f"  Language:     {args.language}")
     print(f"  Device:       {device}")
     print(f"  VAD:          {'enabled (fsmn-vad, max=' + str(args.vad_max_segment) + 'ms)' if args.vad else 'disabled'}")
@@ -88,11 +94,13 @@ def main():
     # =================================================================
     print(f"\n[Step 2] Running ASR with RAG hotword retrieval ...")
     t_start = time.perf_counter()
+    hotwords_val = args.hotwords if is_file else args.hotwords.split(",")
     res = model.generate(
         input=[args.audio],
         cache={},
         batch_size=1,
-        hotword_file=args.hotword_file,
+        hotwords=hotwords_val,
+        hotword_mode=args.mode,
         max_hotwords=args.max_hotwords,
         language=args.language,
         itn=True,
@@ -108,6 +116,7 @@ def main():
     # rag_meta is a list of per-segment dicts, rag_final_hotwords is a list of per-segment lists.
     all_final_texts = []
     total_fast = total_accu = 0
+    total_vad_segments = 0
     global_hw_scores = {}  # {hw: best_score} across all segments
 
     for result in res:
@@ -117,6 +126,7 @@ def main():
         rag_meta_list = result.get("rag_meta") or []
         final_hws_list = result.get("rag_final_hotwords") or []
         n_vad_segments = len(rag_meta_list)
+        total_vad_segments += n_vad_segments
 
         if n_vad_segments == 0:
             print(f"\n  [!] No RAG metadata — RAG pipeline did not run.")
@@ -212,7 +222,8 @@ def main():
     print("Summary — What Actually Happened")
     print(DIV)
     print(f"  Hotword pool:       {hw_count} words")
-    print(f"  VAD segments:       {n_vad_segments}")
+    print(f"  Hotword mode:       {args.mode}")
+    print(f"  VAD segments:       {total_vad_segments}")
     print(f"  FastRAG total:      {total_fast} candidates (across all segments)")
     print(f"  AccuRAG total:      {total_accu} re-ranked  (across all segments)")
     print(f"  Unique hotwords:    {len(global_hw_scores)} (across all segments)")

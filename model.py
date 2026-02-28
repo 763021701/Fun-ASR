@@ -552,22 +552,39 @@ class FunASRNano(nn.Module):
                     speech_idx += 1
         return inputs_embeds, contents, batch, source_ids, meta_data
 
-    def _get_hotword_corrector(self, hotword_file):
-        """Lazy-initialize hotword corrector for RAG-based retrieval."""
+    def _get_hotword_corrector(self, hotword_source):
+        """
+        Lazy-initialize hotword corrector for RAG-based retrieval.
+
+        Args:
+            hotword_source: str (file path) or list/tuple of hotword strings
+        """
         if not hasattr(self, '_hotword_corrector_cache'):
             self._hotword_corrector_cache = {}
-        if hotword_file not in self._hotword_corrector_cache:
+
+        if isinstance(hotword_source, (list, tuple)):
+            cache_key = ("list", tuple(sorted(hotword_source)))
+        else:
+            cache_key = ("file", hotword_source)
+
+        if cache_key not in self._hotword_corrector_cache:
             try:
                 from hotword import PhonemeCorrector
                 corrector = PhonemeCorrector(threshold=0.7, similar_threshold=0.6)
-                with open(hotword_file, 'r', encoding='utf-8') as f:
-                    n = corrector.update_hotwords(f.read())
-                self._hotword_corrector_cache[hotword_file] = corrector
-                logging.info(f"Loaded {n} hotwords from {hotword_file}")
+                if isinstance(hotword_source, str):
+                    with open(hotword_source, 'r', encoding='utf-8') as f:
+                        hw_text = f.read()
+                    label = hotword_source
+                else:
+                    hw_text = "\n".join(hotword_source)
+                    label = f"list({len(hotword_source)} items)"
+                n = corrector.update_hotwords(hw_text)
+                self._hotword_corrector_cache[cache_key] = corrector
+                logging.info(f"Loaded {n} hotwords from {label}")
             except Exception as e:
                 logging.warning(f"Failed to load hotwords: {e}")
-                self._hotword_corrector_cache[hotword_file] = None
-        return self._hotword_corrector_cache[hotword_file]
+                self._hotword_corrector_cache[cache_key] = None
+        return self._hotword_corrector_cache[cache_key]
 
     def get_prompt(self, hotwords: list[str], language: str = None, itn: bool = True):
         if len(hotwords) > 0:
@@ -611,14 +628,35 @@ class FunASRNano(nn.Module):
         frontend=None,
         **kwargs,
     ):
-        hotwords = list(kwargs.get("hotwords", []))
-        hotword_file = kwargs.pop("hotword_file", None)
+        hotwords_raw = kwargs.pop("hotwords", kwargs.pop("hotword_file", []))
+        hotword_mode = kwargs.pop("hotword_mode", "rag")
         max_hotwords = kwargs.pop("max_hotwords", 10)
 
-        # RAG-based hotword retrieval: CTC pre-recognition → phoneme edit distance → retrieve
-        corrector = self._get_hotword_corrector(hotword_file) if hotword_file else None
+        # Parse hotwords source: str (file path) or list
+        if isinstance(hotwords_raw, str) and hotwords_raw:
+            with open(hotwords_raw, 'r', encoding='utf-8') as f:
+                hotword_list = [l.strip() for l in f if l.strip() and not l.strip().startswith('#')]
+        elif isinstance(hotwords_raw, (list, tuple)):
+            hotword_list = list(hotwords_raw)
+        else:
+            hotword_list = []
 
-        if self.ctc_decoder is not None and corrector is not None and corrector.hotwords:
+        # RAG mode: CTC pre-recognition → phoneme retrieval → selective injection
+        # Prompt mode: inject all hotwords directly into prompt
+        use_rag = (
+            hotword_mode == "rag"
+            and hotword_list
+            and self.ctc_decoder is not None
+        )
+
+        if use_rag:
+            corrector = self._get_hotword_corrector(hotword_list)
+            hotwords = []  # RAG will selectively populate this
+        else:
+            corrector = None
+            hotwords = list(hotword_list)  # prompt mode: inject all
+
+        if corrector is not None and corrector.hotwords:
             # Phase 1: run encoder + CTC with a minimal prompt (no hotwords)
             prompt_p1 = self.get_prompt([], kwargs.get("language", None), kwargs.get("itn", True))
             data_in_p1 = [self.generate_chatml(prompt_p1, d) for d in data_in]
