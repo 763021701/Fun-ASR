@@ -99,109 +99,129 @@ def main():
     )
     t_asr = time.perf_counter() - t_start
 
-    n_segments = len(res)
-    print(f"  ASR time:   {t_asr:.2f}s  ({n_segments} segment{'s' if n_segments > 1 else ''})")
+    print(f"  ASR time:   {t_asr:.2f}s")
 
     # =================================================================
-    # 3. Display RAG pipeline results for each segment
+    # 3. Display RAG pipeline results
     # =================================================================
-    # Collect summary stats across all segments
+    # With VAD, funasr merges all segment results into one result dict.
+    # rag_meta is a list of per-segment dicts, rag_final_hotwords is a list of per-segment lists.
     all_final_texts = []
     total_fast = total_accu = 0
+    global_hw_scores = {}  # {hw: best_score} across all segments
 
-    for seg_idx, result in enumerate(res):
-        seg_label = f"Segment {seg_idx + 1}/{n_segments}" if n_segments > 1 else "Result"
-        ctc_text = result.get("ctc_text", "")
+    for result in res:
         final_text = result.get("text", "")
-        rag_meta_list = result.get("rag_meta")
-        rag_meta = rag_meta_list[0] if rag_meta_list else None
-        final_hws_list = result.get("rag_final_hotwords")
-        final_hotwords = final_hws_list[0] if final_hws_list else []
         all_final_texts.append(final_text)
 
-        print(f"\n{'─' * 70}")
-        print(f"[{seg_label}]")
-        print(f"{'─' * 70}")
-        print(f"  CTC text:   {ctc_text}")
+        rag_meta_list = result.get("rag_meta") or []
+        final_hws_list = result.get("rag_final_hotwords") or []
+        n_vad_segments = len(rag_meta_list)
 
-        if not rag_meta:
-            print(f"  [!] No RAG metadata — RAG pipeline did not run for this segment.")
+        if n_vad_segments == 0:
+            print(f"\n  [!] No RAG metadata — RAG pipeline did not run.")
             print(f"  Final text: {final_text}")
             continue
 
-        details = rag_meta.get("rag_details") or {}
-        correction = rag_meta.get("rag_correction")
-        rag_retrieved = rag_meta.get("rag_retrieved_hotwords", [])
+        print(f"\n  VAD segments with RAG: {n_vad_segments}")
 
-        fast_raw = details.get("fast_raw", [])
-        accu_raw = details.get("accu_raw", [])
-        merged   = details.get("merged", [])
-        total_fast += len(fast_raw)
-        total_accu += len(accu_raw)
+        for seg_i, rag_meta in enumerate(rag_meta_list):
+            seg_hws = final_hws_list[seg_i] if seg_i < len(final_hws_list) else []
+            ctc_text = rag_meta.get("rag_ctc_text", "")
+            details = rag_meta.get("rag_details") or {}
+            correction = rag_meta.get("rag_correction")
+            rag_retrieved = rag_meta.get("rag_retrieved_hotwords", [])
 
-        # Stage 1: FastRAG
-        print(f"\n  [Stage 1] FastRAG — {len(fast_raw)} candidates")
-        if fast_raw:
-            show = min(args.top_k, len(fast_raw))
-            for i, (hw, score) in enumerate(fast_raw[:show]):
-                print(f"    {i+1:3d}. {hw:<20s}  score={score:.4f}")
-            if len(fast_raw) > show:
-                print(f"    ... and {len(fast_raw) - show} more")
-        else:
-            print("    (none)")
+            fast_raw = details.get("fast_raw", [])
+            accu_raw = details.get("accu_raw", [])
+            merged   = details.get("merged", [])
+            total_fast += len(fast_raw)
+            total_accu += len(accu_raw)
 
-        # Stage 2: AccuRAG
-        print(f"\n  [Stage 2] AccuRAG — {len(accu_raw)} re-ranked")
-        if accu_raw:
-            show = min(args.top_k, len(accu_raw))
-            for i, (hw, score, start, end) in enumerate(accu_raw[:show]):
-                print(f"    {i+1:3d}. {hw:<20s}  score={score:.4f}  pos=[{start}:{end}]")
-            if len(accu_raw) > show:
-                print(f"    ... and {len(accu_raw) - show} more")
-        else:
-            print("    (none)")
+            # Track global hotword scores
+            for hw in rag_retrieved:
+                if hw not in global_hw_scores:
+                    global_hw_scores[hw] = 0.0
+            if correction:
+                for _, hw, score in correction.matchs:
+                    global_hw_scores[hw] = max(global_hw_scores.get(hw, 0), score)
+                for _, hw, score in correction.similars:
+                    global_hw_scores[hw] = max(global_hw_scores.get(hw, 0), score)
 
-        # Stage 2+: Merged
-        if merged:
-            print(f"\n  [Stage 2+] Merged — top {min(args.top_k, len(merged))}")
-            show = min(args.top_k, len(merged))
-            for i, (hw, score) in enumerate(merged[:show]):
-                print(f"    {i+1:3d}. {hw:<20s}  score={score:.4f}")
-            if len(merged) > show:
-                print(f"    ... and {len(merged) - show} more")
+            # Per-segment header
+            print(f"\n{'─' * 70}")
+            print(f"  [Segment {seg_i + 1}/{n_vad_segments}]")
+            print(f"{'─' * 70}")
+            print(f"  CTC text: {ctc_text}")
 
-        # Stage 3: Matching
-        print(f"\n  [Stage 3] Substring Matching")
-        if correction and correction.matchs:
-            print(f"    Matched (replaced in text):")
-            for orig, hw, score in correction.matchs:
-                print(f"      \"{orig}\" -> \"{hw}\"  score={score:.4f}")
-        else:
-            print(f"    Matched: (none)")
-        if correction and correction.similars:
-            print(f"    Similar (injected as hotword candidates):")
-            for orig, hw, score in correction.similars:
-                print(f"      \"{orig}\" ~ \"{hw}\"  score={score:.4f}")
-        else:
-            print(f"    Similar: (none)")
+            # Stage 1: FastRAG
+            print(f"\n  [Stage 1] FastRAG — {len(fast_raw)} candidates")
+            if fast_raw:
+                show = min(args.top_k, len(fast_raw))
+                for i, (hw, score) in enumerate(fast_raw[:show]):
+                    print(f"    {i+1:3d}. {hw:<20s}  score={score:.4f}")
+                if len(fast_raw) > show:
+                    print(f"    ... and {len(fast_raw) - show} more")
+            else:
+                print("    (none)")
 
-        print(f"\n  RAG retrieved: {rag_retrieved}")
-        print(f"  Final hotwords to LLM: {final_hotwords}")
-        print(f"  LLM output: {final_text}")
+            # Stage 2: AccuRAG
+            print(f"\n  [Stage 2] AccuRAG — {len(accu_raw)} re-ranked")
+            if accu_raw:
+                show = min(args.top_k, len(accu_raw))
+                for i, (hw, score, start, end) in enumerate(accu_raw[:show]):
+                    print(f"    {i+1:3d}. {hw:<20s}  score={score:.4f}  pos=[{start}:{end}]")
+                if len(accu_raw) > show:
+                    print(f"    ... and {len(accu_raw) - show} more")
+            else:
+                print("    (none)")
+
+            # Stage 2+: Merged
+            if merged:
+                print(f"\n  [Stage 2+] Merged — top {min(args.top_k, len(merged))}")
+                show = min(args.top_k, len(merged))
+                for i, (hw, score) in enumerate(merged[:show]):
+                    print(f"    {i+1:3d}. {hw:<20s}  score={score:.4f}")
+                if len(merged) > show:
+                    print(f"    ... and {len(merged) - show} more")
+
+            # Stage 3: Matching
+            print(f"\n  [Stage 3] Substring Matching")
+            if correction and correction.matchs:
+                print(f"    Matched (replaced in text):")
+                for orig, hw, score in correction.matchs:
+                    print(f"      \"{orig}\" -> \"{hw}\"  score={score:.4f}")
+            else:
+                print(f"    Matched: (none)")
+            if correction and correction.similars:
+                print(f"    Similar (injected as hotword candidates):")
+                for orig, hw, score in correction.similars:
+                    print(f"      \"{orig}\" ~ \"{hw}\"  score={score:.4f}")
+            else:
+                print(f"    Similar: (none)")
+
+            print(f"\n  Hotwords to LLM: {seg_hws}")
 
     # =================================================================
     # 4. Summary
     # =================================================================
     full_text = " ".join(t for t in all_final_texts if t)
+    ranked_global = sorted(global_hw_scores.items(), key=lambda x: x[1], reverse=True)
+
     print(f"\n{DIV}")
     print("Summary — What Actually Happened")
     print(DIV)
-    print(f"  Hotword pool:    {hw_count} words")
-    print(f"  Segments:        {n_segments}")
-    print(f"  FastRAG total:   {total_fast} candidates (across all segments)")
-    print(f"  AccuRAG total:   {total_accu} re-ranked  (across all segments)")
-    print(f"  Total time:      {t_asr:.2f}s")
-    print(f"  Full transcript: {full_text}")
+    print(f"  Hotword pool:       {hw_count} words")
+    print(f"  VAD segments:       {n_vad_segments}")
+    print(f"  FastRAG total:      {total_fast} candidates (across all segments)")
+    print(f"  AccuRAG total:      {total_accu} re-ranked  (across all segments)")
+    print(f"  Unique hotwords:    {len(global_hw_scores)} (across all segments)")
+    if ranked_global:
+        print(f"  All retrieved hotwords (by best score):")
+        for i, (hw, score) in enumerate(ranked_global):
+            print(f"    {i+1:3d}. {hw:<20s}  best_score={score:.4f}")
+    print(f"  Total time:         {t_asr:.2f}s")
+    print(f"  Full transcript:    {full_text}")
     print(DIV)
 
 
