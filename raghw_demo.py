@@ -33,8 +33,8 @@ def count_hotwords(path):
 def main():
     parser = argparse.ArgumentParser(description="RAG Hotword Retrieval Demo")
     parser.add_argument("audio", help="Path to audio file")
-    parser.add_argument("--hotwords", default="hot.txt",
-                        help="Hotword file path or comma-separated list (default: hot.txt)")
+    parser.add_argument("--hotwords", default=None,
+                        help="Hotword file path or comma-separated list (default: disabled)")
     parser.add_argument("--mode", default="rag", choices=["rag", "prompt"],
                         help="Hotword mode: 'rag' (default) or 'prompt'")
     parser.add_argument("--language", default="中文", help="Language (default: 中文)")
@@ -65,11 +65,18 @@ def main():
     print(DIV)
 
     import os
-    is_file = os.path.isfile(args.hotwords)
-    hw_count = count_hotwords(args.hotwords) if is_file else len(args.hotwords.split(","))
+    use_hotwords = bool(args.hotwords)
+    is_file = bool(args.hotwords) and os.path.isfile(args.hotwords)
+    hw_count = 0
+    if use_hotwords:
+        hw_count = count_hotwords(args.hotwords) if is_file else len(args.hotwords.split(","))
     print(f"  Audio:        {args.audio}")
-    print(f"  Hotwords:     {args.hotwords} ({hw_count} hotwords)")
-    print(f"  Mode:         {args.mode}")
+    if use_hotwords:
+        print(f"  Hotwords:     {args.hotwords} ({hw_count} hotwords)")
+        print(f"  Mode:         {args.mode}")
+    else:
+        print("  Hotwords:     disabled")
+        print("  Mode:         normal")
     print(f"  Language:     {args.language}")
     print(f"  Device:       {device}")
     print(f"  VAD:          {'enabled (fsmn-vad, max=' + str(args.vad_max_segment) + 'ms)' if args.vad else 'disabled'}")
@@ -92,19 +99,24 @@ def main():
     # =================================================================
     # 2. Run ASR with RAG hotword pipeline
     # =================================================================
-    print(f"\n[Step 2] Running ASR with RAG hotword retrieval ...")
+    if use_hotwords:
+        print(f"\n[Step 2] Running ASR with RAG hotword retrieval ...")
+    else:
+        print(f"\n[Step 2] Running ASR without hotwords ...")
     t_start = time.perf_counter()
-    hotwords_val = args.hotwords if is_file else args.hotwords.split(",")
-    res = model.generate(
+    generate_kwargs = dict(
         input=[args.audio],
         cache={},
         batch_size=1,
-        hotwords=hotwords_val,
-        hotword_mode=args.mode,
-        max_hotwords=args.max_hotwords,
         language=args.language,
         itn=True,
     )
+    if use_hotwords:
+        hotwords_val = args.hotwords if is_file else args.hotwords.split(",")
+        generate_kwargs["hotwords"] = hotwords_val
+        generate_kwargs["hotword_mode"] = args.mode
+        generate_kwargs["max_hotwords"] = args.max_hotwords
+    res = model.generate(**generate_kwargs)
     t_asr = time.perf_counter() - t_start
 
     print(f"  ASR time:   {t_asr:.2f}s")
@@ -129,7 +141,10 @@ def main():
         total_vad_segments += n_vad_segments
 
         if n_vad_segments == 0:
-            print(f"\n  [!] No RAG metadata — RAG pipeline did not run.")
+            if use_hotwords:
+                print(f"\n  [!] No RAG metadata — RAG pipeline did not run.")
+            else:
+                print(f"\n  [!] Normal inference mode — no RAG metadata.")
             print(f"  Final text: {final_text}")
             continue
 
@@ -222,7 +237,7 @@ def main():
     print("Summary — What Actually Happened")
     print(DIV)
     print(f"  Hotword pool:       {hw_count} words")
-    print(f"  Hotword mode:       {args.mode}")
+    print(f"  Hotword mode:       {args.mode if use_hotwords else 'normal'}")
     print(f"  VAD segments:       {total_vad_segments}")
     print(f"  FastRAG total:      {total_fast} candidates (across all segments)")
     print(f"  AccuRAG total:      {total_accu} re-ranked  (across all segments)")
