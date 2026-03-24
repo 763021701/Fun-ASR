@@ -5,7 +5,7 @@ import re
 import string
 import time
 import traceback
-from typing import Union
+from typing import Optional, Union
 
 import torch
 import torch.nn as nn
@@ -552,32 +552,55 @@ class FunASRNano(nn.Module):
                     speech_idx += 1
         return inputs_embeds, contents, batch, source_ids, meta_data
 
-    def _get_hotword_corrector(self, hotword_source):
+    def _load_hotword_lines_from_file(self, path: str) -> list[str]:
+        """Load hotword lines from a file; cache by (abspath, mtime) while file is unchanged."""
+        if not path:
+            return []
+        if not hasattr(self, "_hotword_file_lines_cache"):
+            self._hotword_file_lines_cache = {}
+        ap = os.path.abspath(path)
+        try:
+            mtime = os.path.getmtime(ap)
+        except OSError as e:
+            logging.warning(f"Hotword file not readable: {ap} ({e})")
+            return []
+        cached = self._hotword_file_lines_cache.get(ap)
+        if cached is not None and cached[0] == mtime:
+            return cached[1]
+        with open(ap, "r", encoding="utf-8") as f:
+            lines = [l.strip() for l in f if l.strip() and not l.strip().startswith("#")]
+        self._hotword_file_lines_cache[ap] = (mtime, lines)
+        return lines
+
+    def _get_hotword_corrector(self, hotword_list: list, source_path: Optional[str] = None):
         """
         Lazy-initialize hotword corrector for RAG-based retrieval.
 
         Args:
-            hotword_source: str (file path) or list/tuple of hotword strings
+            hotword_list: hotword strings (already parsed).
+            source_path: if hotwords came from a file, absolute path + mtime is used as cache key
+                (avoids O(n log n) sorted(tuple) each inference and duplicate file reads).
         """
-        if not hasattr(self, '_hotword_corrector_cache'):
+        if not hasattr(self, "_hotword_corrector_cache"):
             self._hotword_corrector_cache = {}
 
-        if isinstance(hotword_source, (list, tuple)):
-            cache_key = ("list", tuple(sorted(hotword_source)))
+        if source_path:
+            ap = os.path.abspath(source_path)
+            try:
+                mtime = os.path.getmtime(ap)
+            except OSError:
+                mtime = None
+            cache_key = ("file", ap, mtime)
         else:
-            cache_key = ("file", hotword_source)
+            cache_key = ("list", tuple(sorted(hotword_list)))
 
         if cache_key not in self._hotword_corrector_cache:
             try:
                 from hotword import PhonemeCorrector
+
                 corrector = PhonemeCorrector(threshold=0.7, similar_threshold=0.6)
-                if isinstance(hotword_source, str):
-                    with open(hotword_source, 'r', encoding='utf-8') as f:
-                        hw_text = f.read()
-                    label = hotword_source
-                else:
-                    hw_text = "\n".join(hotword_source)
-                    label = f"list({len(hotword_source)} items)"
+                hw_text = "\n".join(hotword_list)
+                label = source_path if source_path else f"list({len(hotword_list)} items)"
                 n = corrector.update_hotwords(hw_text)
                 self._hotword_corrector_cache[cache_key] = corrector
                 logging.info(f"Loaded {n} hotwords from {label}")
@@ -633,9 +656,10 @@ class FunASRNano(nn.Module):
         max_hotwords = kwargs.pop("max_hotwords", 10)
 
         # Parse hotwords source: str (file path) or list
+        hotword_source_path = None
         if isinstance(hotwords_raw, str) and hotwords_raw:
-            with open(hotwords_raw, 'r', encoding='utf-8') as f:
-                hotword_list = [l.strip() for l in f if l.strip() and not l.strip().startswith('#')]
+            hotword_source_path = hotwords_raw
+            hotword_list = self._load_hotword_lines_from_file(hotwords_raw)
         elif isinstance(hotwords_raw, (list, tuple)):
             hotword_list = list(hotwords_raw)
         else:
@@ -650,7 +674,9 @@ class FunASRNano(nn.Module):
         )
 
         if use_rag:
-            corrector = self._get_hotword_corrector(hotword_list)
+            corrector = self._get_hotword_corrector(
+                hotword_list, source_path=hotword_source_path
+            )
             hotwords = []  # RAG will selectively populate this
         else:
             corrector = None
