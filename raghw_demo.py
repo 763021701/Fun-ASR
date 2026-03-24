@@ -11,11 +11,9 @@ model's return value — guaranteed to match what was injected into the LLM.
 
 Usage:
     python raghw_demo.py audio.wav
-    python raghw_demo.py audio.wav --hotwords hot.txt
-    python raghw_demo.py audio.wav --hotwords hot.txt --top_k 30
-    python raghw_demo.py audio.wav --hotwords hot.txt --mode prompt  # prompt mode
-    python raghw_demo.py audio.wav --vad                             # enable VAD
-    python raghw_demo.py audio.wav --vad --vad_max_segment 30000
+    python raghw_demo.py audio.wav --vad  # enable VAD
+    python raghw_demo.py audio.wav --vad --hotwords hot.txt --mode prompt  # prompt mode
+    python raghw_demo.py audio.wav --vad --hotwords hot.txt --mode rag --max_hotwords 30 --top_k 30  # rag mode
 """
 
 import sys
@@ -37,7 +35,8 @@ def main():
                         help="Hotword file path or comma-separated list (default: disabled)")
     parser.add_argument("--mode", default="rag", choices=["rag", "prompt"],
                         help="Hotword mode: 'rag' (default) or 'prompt'")
-    parser.add_argument("--language", default="中文", help="Language (default: 中文)")
+    parser.add_argument("--language", default=None,
+                        help="Language for ASR prompt (default: None)")
     parser.add_argument("--model_dir", default="FunAudioLLM/Fun-ASR-Nano-2512")
     parser.add_argument("--max_hotwords", type=int, default=10,
                         help="Max hotwords injected into LLM prompt (default: 10)")
@@ -77,7 +76,8 @@ def main():
     else:
         print("  Hotwords:     disabled")
         print("  Mode:         normal")
-    print(f"  Language:     {args.language}")
+    lang_display = args.language if args.language is not None else "None (model default)"
+    print(f"  Language:     {lang_display}")
     print(f"  Device:       {device}")
     print(f"  VAD:          {'enabled (fsmn-vad, max=' + str(args.vad_max_segment) + 'ms)' if args.vad else 'disabled'}")
 
