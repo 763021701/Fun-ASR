@@ -1,2 +1,5 @@
 __pycache__/
+.itn_cache/
 .ipynb_checkpoints/
+*.log
+test_files/

@@ -11,9 +11,12 @@ import logging
 logger = logging.getLogger("hotword")
 
 from .hot_phoneme import PhonemeCorrector, CorrectionResult
+from .ctc_rag_retriever import CTCRagRetriever, CTCRagResult
 
 __all__ = [
     'PhonemeCorrector',
     'CorrectionResult',
+    'CTCRagRetriever',
+    'CTCRagResult',
     'logger',
 ]

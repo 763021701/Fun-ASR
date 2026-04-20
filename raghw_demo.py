@@ -1,19 +1,19 @@
 """
-RAG Hotword Retrieval Demo
+CTC-RAG Hotword Retrieval Demo
 
-Visualize the actual three-stage RAG hotword retrieval pipeline as it runs
-inside model.inference(). All displayed results are read directly from the
-model's return value — guaranteed to match what was injected into the LLM.
+Visualize the actual CTC-RAG hotword retrieval pipeline as it runs inside
+model.inference(). All displayed results are read directly from the model's
+return value and reflect what was injected into the LLM.
 
-  Stage 1: FastRAG  - inverted index + Numba JIT edit distance (coarse)
-  Stage 2: AccuRAG  - fuzzy phoneme weights re-ranking (precise)
-  Stage 3: Matching - substring search with word boundary constraints
+  Stage 1: Radar Scan         - search hotwords in the Top-K CTC lattice
+  Stage 2: Integrated CTC     - merge radar hits into the greedy CTC stream
+  Stage 3: Phoneme Correction - fuzzy correction and extra hotword expansion
 
 Usage:
     python raghw_demo.py audio.wav
     python raghw_demo.py audio.wav --vad  # enable VAD
     python raghw_demo.py audio.wav --vad --hotwords hot.txt --mode prompt  # prompt mode
-    python raghw_demo.py audio.wav --vad --hotwords hot.txt --mode rag --max_hotwords 30 --top_k 30  # rag mode
+    python raghw_demo.py audio.wav --vad --hotwords hot.txt --mode ctc_rag --max_hotwords 30 --top_k 30
 """
 
 import sys
@@ -29,12 +29,12 @@ def count_hotwords(path):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="RAG Hotword Retrieval Demo")
+    parser = argparse.ArgumentParser(description="CTC-RAG Hotword Retrieval Demo")
     parser.add_argument("audio", help="Path to audio file")
     parser.add_argument("--hotwords", default=None,
                         help="Hotword file path or comma-separated list (default: disabled)")
-    parser.add_argument("--mode", default="rag", choices=["rag", "prompt"],
-                        help="Hotword mode: 'rag' (default) or 'prompt'")
+    parser.add_argument("--mode", default="ctc_rag", choices=["ctc_rag", "prompt"],
+                        help="Hotword mode: 'ctc_rag' (default) or 'prompt'")
     parser.add_argument("--language", default=None,
                         help="Language for ASR prompt (default: None)")
     parser.add_argument("--model_dir", default="FunAudioLLM/Fun-ASR-Nano-2512")
@@ -60,7 +60,7 @@ def main():
     # 1. Load ASR model
     # =================================================================
     print(DIV)
-    print("RAG Hotword Retrieval Demo")
+    print("CTC-RAG Hotword Retrieval Demo")
     print(DIV)
 
     import os
@@ -100,7 +100,7 @@ def main():
     # 2. Run ASR with RAG hotword pipeline
     # =================================================================
     if use_hotwords:
-        print(f"\n[Step 2] Running ASR with RAG hotword retrieval ...")
+        print(f"\n[Step 2] Running ASR with CTC-RAG hotword retrieval ...")
     else:
         print(f"\n[Step 2] Running ASR without hotwords ...")
     t_start = time.perf_counter()
@@ -122,12 +122,12 @@ def main():
     print(f"  ASR time:   {t_asr:.2f}s")
 
     # =================================================================
-    # 3. Display RAG pipeline results
+    # 3. Display CTC-RAG pipeline results
     # =================================================================
     # With VAD, funasr merges all segment results into one result dict.
     # rag_meta is a list of per-segment dicts, rag_final_hotwords is a list of per-segment lists.
     all_final_texts = []
-    total_fast = total_accu = 0
+    total_radar = total_extra = 0
     total_vad_segments = 0
     global_hw_scores = {}  # {hw: best_score} across all segments
 
@@ -142,26 +142,27 @@ def main():
 
         if n_vad_segments == 0:
             if use_hotwords:
-                print(f"\n  [!] No RAG metadata — RAG pipeline did not run.")
+                print(f"\n  [!] No CTC-RAG metadata — retrieval pipeline did not run.")
             else:
-                print(f"\n  [!] Normal inference mode — no RAG metadata.")
+                print(f"\n  [!] Normal inference mode — no retrieval metadata.")
             print(f"  Final text: {final_text}")
             continue
 
-        print(f"\n  VAD segments with RAG: {n_vad_segments}")
+        print(f"\n  VAD segments with retrieval metadata: {n_vad_segments}")
 
         for seg_i, rag_meta in enumerate(rag_meta_list):
             seg_hws = final_hws_list[seg_i] if seg_i < len(final_hws_list) else []
             ctc_text = rag_meta.get("rag_ctc_text", "")
+            integrated_text = rag_meta.get("rag_integrated_text", ctc_text)
             details = rag_meta.get("rag_details") or {}
             correction = rag_meta.get("rag_correction")
             rag_retrieved = rag_meta.get("rag_retrieved_hotwords", [])
-
-            fast_raw = details.get("fast_raw", [])
-            accu_raw = details.get("accu_raw", [])
-            merged   = details.get("merged", [])
-            total_fast += len(fast_raw)
-            total_accu += len(accu_raw)
+            radar_texts = rag_meta.get("rag_radar_texts", [])
+            extra_hotwords = rag_meta.get("rag_extra_hotwords", [])
+            ctc_topk = rag_meta.get("rag_ctc_topk")
+            ctc_rag_timings = rag_meta.get("rag_ctc_rag_timings") or {}
+            total_radar += len(radar_texts)
+            total_extra += len(extra_hotwords)
 
             # Track global hotword scores
             for hw in rag_retrieved:
@@ -177,53 +178,48 @@ def main():
             print(f"\n{'─' * 70}")
             print(f"  [Segment {seg_i + 1}/{n_vad_segments}]")
             print(f"{'─' * 70}")
-            print(f"  CTC text: {ctc_text}")
+            print(f"  Greedy CTC text: {ctc_text}")
+            if integrated_text != ctc_text:
+                print(f"  Integrated CTC text: {integrated_text}")
 
-            # Stage 1: FastRAG
-            print(f"\n  [Stage 1] FastRAG — {len(fast_raw)} candidates")
-            if fast_raw:
-                show = min(args.top_k, len(fast_raw))
-                for i, (hw, score) in enumerate(fast_raw[:show]):
-                    print(f"    {i+1:3d}. {hw:<20s}  score={score:.4f}")
-                if len(fast_raw) > show:
-                    print(f"    ... and {len(fast_raw) - show} more")
+            print(f"\n  [Stage 1] Radar Scan — {len(radar_texts)} detected hotwords (top_k={ctc_topk})")
+            if radar_texts:
+                show = min(args.top_k, len(radar_texts))
+                for i, hw in enumerate(radar_texts[:show]):
+                    print(f"    {i+1:3d}. {hw}")
+                if len(radar_texts) > show:
+                    print(f"    ... and {len(radar_texts) - show} more")
             else:
                 print("    (none)")
 
-            # Stage 2: AccuRAG
-            print(f"\n  [Stage 2] AccuRAG — {len(accu_raw)} re-ranked")
-            if accu_raw:
-                show = min(args.top_k, len(accu_raw))
-                for i, (hw, score, start, end) in enumerate(accu_raw[:show]):
-                    print(f"    {i+1:3d}. {hw:<20s}  score={score:.4f}  pos=[{start}:{end}]")
-                if len(accu_raw) > show:
-                    print(f"    ... and {len(accu_raw) - show} more")
+            print(f"\n  [Stage 2] Integrated CTC")
+            if integrated_text != ctc_text:
+                print("    Radar hits were merged into the greedy token stream.")
             else:
-                print("    (none)")
+                print("    No radar merge was applied.")
 
-            # Stage 2+: Merged
-            if merged:
-                print(f"\n  [Stage 2+] Merged — top {min(args.top_k, len(merged))}")
-                show = min(args.top_k, len(merged))
-                for i, (hw, score) in enumerate(merged[:show]):
-                    print(f"    {i+1:3d}. {hw:<20s}  score={score:.4f}")
-                if len(merged) > show:
-                    print(f"    ... and {len(merged) - show} more")
-
-            # Stage 3: Matching
-            print(f"\n  [Stage 3] Substring Matching")
+            print(f"\n  [Stage 3] Phoneme Correction")
             if correction and correction.matchs:
-                print(f"    Matched (replaced in text):")
+                print("    Matched (replaced in text):")
                 for orig, hw, score in correction.matchs:
                     print(f"      \"{orig}\" -> \"{hw}\"  score={score:.4f}")
             else:
-                print(f"    Matched: (none)")
+                print("    Matched: (none)")
             if correction and correction.similars:
-                print(f"    Similar (injected as hotword candidates):")
+                print("    Similar (injected as hotword candidates):")
                 for orig, hw, score in correction.similars:
                     print(f"      \"{orig}\" ~ \"{hw}\"  score={score:.4f}")
             else:
-                print(f"    Similar: (none)")
+                print("    Similar: (none)")
+            if extra_hotwords:
+                print(f"    Extra hotwords from correction: {extra_hotwords[:args.top_k]}")
+                if len(extra_hotwords) > args.top_k:
+                    print(f"    ... and {len(extra_hotwords) - args.top_k} more")
+
+            if ctc_rag_timings:
+                print("\n  Timings:")
+                for name, value in ctc_rag_timings.items():
+                    print(f"    {name:<18s} {value * 1000.0:8.2f} ms")
 
             print(f"\n  Hotwords to LLM: {seg_hws}")
 
@@ -239,8 +235,8 @@ def main():
     print(f"  Hotword pool:       {hw_count} words")
     print(f"  Hotword mode:       {args.mode if use_hotwords else 'normal'}")
     print(f"  VAD segments:       {total_vad_segments}")
-    print(f"  FastRAG total:      {total_fast} candidates (across all segments)")
-    print(f"  AccuRAG total:      {total_accu} re-ranked  (across all segments)")
+    print(f"  Radar hits total:   {total_radar} (across all segments)")
+    print(f"  Correction extras:  {total_extra} (across all segments)")
     print(f"  Unique hotwords:    {len(global_hw_scores)} (across all segments)")
     if ranked_global:
         print(f"  All retrieved hotwords (by best score):")
